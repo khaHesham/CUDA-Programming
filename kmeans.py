@@ -15,7 +15,7 @@ N, D = data.shape
 
 np.random.seed(RAND_SEED)
 init_centroids = np.random.rand(K, D)
-np.savetxt(sys.argv[4], init_centroids, fmt='%.6f')
+np.savetxt(sys.argv[4], init_centroids, fmt='%.8f')
 centroids, labels = kmeans2(data, init_centroids, minit='matrix', iter = 100)
 
 np.savetxt(sys.argv[2], labels, fmt='%d')
