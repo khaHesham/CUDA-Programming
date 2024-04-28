@@ -86,14 +86,25 @@ __global__ void divide(float* dividend, uint* divisor, uint n, uint D)
 }
 
 void initialize_centroids(float* centroids, float* datapoints, Params params) {
-    srand(time(NULL));
+    // srand(time(NULL));
     // for (int i = 0; i < params.K; i++) {
     //     uint point_idx = rand() % params.N; // generate a random number between [0, N)
     //     for (int j = 0; j < params.D; j++)
     //         centroids[i * params.D + j] = datapoints[point_idx * params.D + j];
     // }
+    // for (int i = 0; i < params.K * params.D; i++)
+    //     centroids[i] = (float)rand() / RAND_MAX;
+
+    FILE* init_centroids_file = fopen("init.txt", "r");
+    if (init_centroids_file == NULL) {
+        printf("Error opening data file.\n");
+        exit(1);
+    }
+
     for (int i = 0; i < params.K * params.D; i++)
-        centroids[i] = (float)rand() / RAND_MAX;
+        fscanf(init_centroids_file, "%f", &centroids[i]);
+
+    fclose(init_centroids_file);
 }
 
 void write_results(float* centroids, uint* assignments, const char* clusters_path, const char* centroids_path, Params params){
@@ -151,6 +162,7 @@ void kmeans(float* datapoints, float* centroids, uint* assignments, Params param
     cudaMalloc((void**)&d_changed, sizeof(uint));
 
     assign_points << <gridDim, blockDim >> > (d_datapoints, d_centroids, d_assignments, d_changed, params);
+    cudaDeviceSynchronize();
 
     while(!converged) {
         set_to_zero << <(K*D-1)/BLOCK_SIZE + 1, blockDim >> > (d_centroids, K * D);
@@ -158,8 +170,7 @@ void kmeans(float* datapoints, float* centroids, uint* assignments, Params param
         update_centroids << <gridDim, blockDim >> > (d_datapoints, d_assignments, d_centroids, d_clusters_count, params);
         divide << <(K-1)/BLOCK_SIZE + 1, blockDim >> > (d_centroids, d_clusters_count, K, D);
 
-        changed = 0;
-        cudaMemcpy(d_changed, &changed, sizeof(uint), cudaMemcpyHostToDevice);
+        cudaMemset(d_changed, 0, sizeof(uint));
         assign_points << <gridDim, blockDim >> > (d_datapoints, d_centroids, d_assignments, d_changed, params);
         cudaMemcpy(&changed, d_changed, sizeof(uint), cudaMemcpyDeviceToHost);
 
