@@ -128,8 +128,11 @@ __global__ void divide(float* dividend, uint* divisor, uint n, uint D)
     uint idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     if(idx < n){
-        for(int j = 0; j < D; j++)
-            dividend[idx*D + j] = dividend[idx*D + j] / divisor[idx];
+        uint div = divisor[idx];
+        if(div != 0){
+            for(int j = 0; j < D; j++)
+                dividend[idx*D + j] = dividend[idx*D + j] / div;
+        }
     }
 }
 
@@ -145,7 +148,7 @@ void initialize_centroids(float* centroids, float* datapoints, Params params) {
 
     FILE* init_centroids_file = fopen("init.txt", "r");
     if (init_centroids_file == NULL) {
-        printf("Error opening data file.\n");
+        printf("Error opening inital centroids file.\n");
         exit(1);
     }
 
