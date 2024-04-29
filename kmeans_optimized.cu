@@ -18,10 +18,30 @@ typedef struct Params {
 } Params;
 
 
-// Naiive version
 __global__ void assign_points(float* datapoints, float* centroids, uint* assignments, uint* changed, Params params)
 {
+    extern __shared__ char shared_mem[];
+
     uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Since only one shared memory array is allowed, we divide it using pointer arithmetic
+    float* centroids_s = (float*) shared_mem;
+    float* datapoint_s = (float*) &centroids_s[params.K * params.D];
+
+    // Cache the centroids in shared memory
+    for(int cluster = threadIdx.x; cluster < params.K; cluster += blockDim.x){
+        for(int j = 0; j < params.D; j++)
+            centroids_s[cluster * params.D + j] = centroids[cluster * params.D + j];
+    }
+
+    // Cache the datapoints since each will be read K times by a thread 
+    // Although no data is shared between threads, we still want to get the benefit of caching
+    if(idx < params.N){
+        for(int j = 0; j < params.D; j++)
+            datapoint_s[threadIdx.x*params.D + j]  = datapoints[idx*params.D + j];
+    }
+
+    __syncthreads();
 
     if(idx < params.N){
         uint nearest_centroid = 0;
@@ -31,7 +51,7 @@ __global__ void assign_points(float* datapoints, float* centroids, uint* assignm
             float dist = 0;
     
             for(int j = 0; j < params.D; j++){
-                float diff = datapoints[idx*params.D + j] - centroids[centroid_id*params.D + j];
+                float diff = datapoint_s[threadIdx.x*params.D + j] - centroids_s[centroid_id*params.D + j];
                 dist += diff * diff;
             }
     
@@ -190,9 +210,9 @@ void kmeans(float* datapoints, float* centroids, uint* assignments, Params param
     cudaMalloc((void**)&d_changed, sizeof(uint));
 
     size_t update_shared_mem = K * D * sizeof(float) + K * sizeof(uint);
-    // size_t assign_shared_mem = K * D * sizeof(float) + blockDim.x * D * sizeof(float);
+    size_t assign_shared_mem = K * D * sizeof(float) + blockDim.x * D * sizeof(float);
 
-    assign_points << <gridDim, blockDim >> > (d_datapoints, d_centroids, d_assignments, d_changed, params);
+    assign_points << <gridDim, blockDim, assign_shared_mem >> > (d_datapoints, d_centroids, d_assignments, d_changed, params);
     cudaDeviceSynchronize();
 
     while(!converged) {
@@ -202,9 +222,14 @@ void kmeans(float* datapoints, float* centroids, uint* assignments, Params param
         divide << <(K-1)/BLOCK_SIZE + 1, blockDim >> > (d_centroids, d_clusters_count, K, D);
 
         cudaMemset(d_changed, 0, sizeof(uint));
-        // assign_points << <gridDim, blockDim, assign_shared_mem >> > (d_datapoints, d_centroids, d_assignments, d_changed, params);
-        assign_points << <gridDim, blockDim >> > (d_datapoints, d_centroids, d_assignments, d_changed, params);
+        assign_points << <gridDim, blockDim, assign_shared_mem >> > (d_datapoints, d_centroids, d_assignments, d_changed, params);
         cudaMemcpy(&changed, d_changed, sizeof(uint), cudaMemcpyDeviceToHost);
+
+        cudaError_t cudaStatus = cudaGetLastError();
+        if (cudaStatus != cudaSuccess) {
+            printf("Kernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
+            exit(1);
+        }
 
         converged = (changed <= CONVERGENCE_THRESHOLD);
     }
