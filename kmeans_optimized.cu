@@ -63,7 +63,7 @@ __global__ void update_centroids(float* datapoints, uint* assignments, float* ce
     for(int cluster = threadIdx.x; cluster < params.K; cluster += blockDim.x){
         clusters_count_s[cluster] = 0;
 
-        for(int j = 0; j < params.K; j++)
+        for(int j = 0; j < params.D; j++)
             centroids_s[cluster * params.D + j] = 0.0f;
     }
 
@@ -189,7 +189,8 @@ void kmeans(float* datapoints, float* centroids, uint* assignments, Params param
     uint changed, *d_changed;
     cudaMalloc((void**)&d_changed, sizeof(uint));
 
-    size_t shared_mem_size = K * D * sizeof(float) + K * sizeof(uint);
+    size_t update_shared_mem = K * D * sizeof(float) + K * sizeof(uint);
+    // size_t assign_shared_mem = K * D * sizeof(float) + blockDim.x * D * sizeof(float);
 
     assign_points << <gridDim, blockDim >> > (d_datapoints, d_centroids, d_assignments, d_changed, params);
     cudaDeviceSynchronize();
@@ -197,10 +198,11 @@ void kmeans(float* datapoints, float* centroids, uint* assignments, Params param
     while(!converged) {
         set_to_zero << <(K*D-1)/BLOCK_SIZE + 1, blockDim >> > (d_centroids, K * D);
         set_to_zero << <(K-1)/BLOCK_SIZE + 1, blockDim >> > (d_clusters_count, K);
-        update_centroids << <gridDim, blockDim, shared_mem_size >> > (d_datapoints, d_assignments, d_centroids, d_clusters_count, params);
+        update_centroids << <gridDim, blockDim, update_shared_mem >> > (d_datapoints, d_assignments, d_centroids, d_clusters_count, params);
         divide << <(K-1)/BLOCK_SIZE + 1, blockDim >> > (d_centroids, d_clusters_count, K, D);
 
         cudaMemset(d_changed, 0, sizeof(uint));
+        // assign_points << <gridDim, blockDim, assign_shared_mem >> > (d_datapoints, d_centroids, d_assignments, d_changed, params);
         assign_points << <gridDim, blockDim >> > (d_datapoints, d_centroids, d_assignments, d_changed, params);
         cudaMemcpy(&changed, d_changed, sizeof(uint), cudaMemcpyDeviceToHost);
 
