@@ -11,8 +11,13 @@ if len(sys.argv) < 4:
 K = int(sys.argv[5])
 
 data = np.loadtxt(sys.argv[1])
-N, D = data.shape
 
+N, D = 0, 0
+if len(data.shape) == 1:
+    N, D = data.shape[0], 1
+    data = data.reshape(N, 1)
+else:
+    N, D = data.shape[0], data.shape[1]
 np.random.seed(RAND_SEED)
 init_centroids = np.random.rand(K, D)
 np.savetxt(sys.argv[4], init_centroids, fmt='%.8f')

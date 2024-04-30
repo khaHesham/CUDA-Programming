@@ -257,7 +257,7 @@ int main(int argc, char* argv[])
     uint N = atoi(argv[4]);
     uint D = atoi(argv[5]);
     uint K = atoi(argv[6]);
-    Params params = { .N = N, .D = D, .K = K };
+    Params params = { N, D, K };
 
     // Allocating host memory
     float* datapoints, * centroids;
