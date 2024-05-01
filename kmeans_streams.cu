@@ -207,7 +207,7 @@ void kmeans(float *datapoints, float *centroids, uint *assignments, Params param
         cudaStreamCreate(&streams[i]);
 
     // Stream the segments
-    uint segment_size = (N - 1) / num_streams + 1;
+    uint segment_size = (N - 1) / num_streams + 1;      // divide data among streams
 
     for (int i = 0; i < num_streams; i++)
     {
@@ -219,18 +219,19 @@ void kmeans(float *datapoints, float *centroids, uint *assignments, Params param
         uint stream_size = end - start;
         uint stream_offset = start * D;
 
+        // create each stream memory  (or i can create it one time and adjust indexing inside it)
         float *d_datapoints, *d_centroids;
         uint *d_assignments, *d_clusters_count;
 
-        cudaMalloc((void **)&d_datapoints, stream_size * D * sizeof(float));
+        cudaMalloc((void **)&d_datapoints, stream_size * D * sizeof(float)); 
         cudaMalloc((void **)&d_centroids, K * D * sizeof(float));
         cudaMalloc((void **)&d_assignments, stream_size * sizeof(uint));
         cudaMalloc((void **)&d_clusters_count, K * sizeof(int));
 
-        cudaMemcpyAsync(d_datapoints, &datapoints[stream_offset], stream_size * D * sizeof(float), cudaMemcpyHostToDevice, streams[i]);
+        cudaMemcpyAsync(d_datapoints, &datapoints[start], stream_size * D * sizeof(float), cudaMemcpyHostToDevice, streams[i]);
         cudaMemcpyAsync(d_centroids, centroids, K * D * sizeof(float), cudaMemcpyHostToDevice, streams[i]);
 
-        dim3 gridDim((stream_size - 1) / BLOCK_SIZE + 1, 1);
+        dim3 gridDim((stream_size - 1) / BLOCK_SIZE + 1, 1);   // split grid among each stream
         dim3 blockDim(BLOCK_SIZE, 1);
 
         bool converged = false;
@@ -238,8 +239,8 @@ void kmeans(float *datapoints, float *centroids, uint *assignments, Params param
         uint changed, *d_changed;
         cudaMalloc((void **)&d_changed, sizeof(uint));
 
-        size_t update_shared_mem = K * D * sizeof(float) + K * sizeof(uint);
-        size_t assign_shared_mem = K * D * sizeof(float) + blockDim.x * D * sizeof(float);
+        size_t update_shared_mem = K * stream_size * sizeof(float) + K * sizeof(uint);
+        size_t assign_shared_mem = K * stream_size * sizeof(float) + blockDim.x * stream_size * sizeof(float);
 
         assign_points<<<gridDim, blockDim, assign_shared_mem, streams[i]>>>(d_datapoints, d_centroids, d_assignments, d_changed, params);
         cudaDeviceSynchronize();
