@@ -200,6 +200,15 @@ void kmeans(float *datapoints, float *centroids, uint *assignments, Params param
 {
     uint N = params.N, D = params.D, K = params.K;
 
+    l:int seed = time(NULL);
+    // Your code here
+
+    // Jump to the label
+    goto l;
+
+
+
+
     // setup streams
     const uint num_streams = 32;
     cudaStream_t streams[num_streams];
