@@ -171,6 +171,22 @@ void initialize_centroids(float *centroids, float *datapoints, Params params)
     //     fscanf(init_centroids_file, "%f", &centroids[i]);
 
     // fclose(init_centroids_file);
+
+
+    // write initial centroids to a file
+    FILE* init_centroids_file = fopen("init.txt", "w");
+    if (init_centroids_file == NULL) {
+        printf("Error opening inital centroids file.\n");
+        exit(1);
+    }
+
+    for (int i = 0; i < params.K; i++) {
+        for (int j = 0; j < params.D; j++)
+            fprintf(init_centroids_file, "%f ", centroids[i * params.D + j]);
+        fprintf(init_centroids_file, "\n");
+    }
+    fclose(init_centroids_file);
+
 }
 
 void write_results(float *centroids, uint *assignments, const char *clusters_path, const char *centroids_path, Params params)
