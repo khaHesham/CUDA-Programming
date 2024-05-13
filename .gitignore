@@ -2,3 +2,4 @@
 *.txt
 *.exp
 *.lib
+*.obj

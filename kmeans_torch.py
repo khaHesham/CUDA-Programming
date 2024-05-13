@@ -17,7 +17,7 @@ def main():
     
     # kmeans
     cluster_ids_x, cluster_centers = kmeans(
-        X=data, num_clusters=num_clusters, distance='euclidean', device=torch.device('cuda:0')
+        X=data, num_clusters=num_clusters, distance='euclidean', device=torch.device('cuda:0'),iter_limit = 100
     )
     
     # Save final cluster indices

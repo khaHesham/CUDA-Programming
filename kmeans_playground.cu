@@ -19,9 +19,70 @@ typedef struct Params
     uint K;
 } Params;
 
-__global__ void assign_points(float *datapoints, float *centroids, uint *assignments, Params params)
+
+// Kernel to compute distances between a datapoint and all centroids
+__device__ float computeDistance(const float *datapoint, const float *centroid, int D)
 {
-    extern __shared__ char shared_mem[];
+    float distance = 0.0f;
+    int tid = threadIdx.x;
+    int blockSize = blockDim.x;
+
+    // Compute distance in parallel
+    for (int j = tid; j < D; j += blockSize)
+    {
+        float diff = datapoint[j] - centroid[j];
+        distance += diff * diff;
+    }
+
+    // Reduce within the block using shared memory
+    __shared__ float shared_distance[BLOCK_SIZE];
+    shared_distance[tid] = distance;
+    __syncthreads();
+
+    for (int stride = blockSize / 2; stride > 0; stride >>= 1)
+    {
+        if (tid < stride)
+        {
+            shared_distance[tid] += shared_distance[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    // Store the final result in distance
+    if (tid == 0)
+    {
+        distance = shared_distance[0];
+    }
+
+    return distance;
+}
+
+// Child kernel to find the nearest centroid for each datapoint
+__global__ void findNearestCentroids(const float *datapoints, const float *centroids, uint *assignments, int N, int K, int D)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < N)
+    {
+        float minDist = FLT_MAX;
+        uint nearestCentroid = 0;
+        for (int centroidId = 0; centroidId < K; ++centroidId)
+        {
+            float dist = computeDistance(&datapoints[idx * D], &centroids[centroidId * D], D);
+            if (dist < minDist)
+            {
+                minDist = dist;
+                nearestCentroid = centroidId;
+            }
+        }
+        if (nearestCentroid != assignments[idx])
+        {
+            assignments[idx] = nearestCentroid;
+        }
+    }
+}
+
+__global__ void assign_points(float *datapoints, float *centroids, uint *assignments, Params params) {
+     extern __shared__ char shared_mem[];
 
     uint idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -46,34 +107,44 @@ __global__ void assign_points(float *datapoints, float *centroids, uint *assignm
 
     __syncthreads();
 
-    if (idx < params.N)
+    // check if we have a multiple dimensions then run computeDistance kernell else run the simple distance calculation
+    if (params.D > 10)
     {
-        uint nearest_centroid = 0;
         float min_dist = FLT_MAX;
+        uint min_cluster = 0;
 
-        for (int centroid_id = 0; centroid_id < params.K; centroid_id++)
+        for (int cluster = 0; cluster < params.K; cluster++)
         {
-            float dist = 0;
-
-            for (int j = 0; j < params.D; j++)
-            {
-                float diff = datapoint_s[threadIdx.x * params.D + j] - centroids_s[centroid_id * params.D + j];
-                dist += diff * diff;
-            }
-
+            float dist = computeDistance(&datapoint_s[threadIdx.x * params.D], &centroids_s[cluster * params.D], params.D);
             if (dist < min_dist)
             {
                 min_dist = dist;
-                nearest_centroid = centroid_id;
+                min_cluster = cluster;
             }
         }
 
-        if (nearest_centroid != assignments[idx])
-        {
-            assignments[idx] = nearest_centroid;
-            // atomicAdd(changed, 1); // Increment the number of points whose assigned cluster changed
-        }
+        if (min_cluster != assignments[idx])
+            assignments[idx] = min_cluster;
     }
+    else
+    {
+        float min_dist = FLT_MAX;
+        uint min_cluster = 0;
+
+        for (int cluster = 0; cluster < params.K; cluster++)
+        {
+            float dist = (datapoint_s[threadIdx.x] - centroids_s[cluster]) * (datapoint_s[threadIdx.x] - centroids_s[cluster]);
+            if (dist < min_dist)
+            {
+                min_dist = dist;
+                min_cluster = cluster;
+            }
+        }
+
+        if (min_cluster != assignments[idx])
+            assignments[idx] = min_cluster;
+    }
+
 }
 
 __global__ void update_centroids(float *datapoints, uint *assignments, float *centroids, uint *clusters_count, Params params)
@@ -172,21 +243,21 @@ void initialize_centroids(float *centroids, float *datapoints, Params params)
 
     // fclose(init_centroids_file);
 
-
     // write initial centroids to a file
-    FILE* init_centroids_file = fopen("init.txt", "w");
-    if (init_centroids_file == NULL) {
+    FILE *init_centroids_file = fopen("init.txt", "w");
+    if (init_centroids_file == NULL)
+    {
         printf("Error opening inital centroids file.\n");
         exit(1);
     }
 
-    for (int i = 0; i < params.K; i++) {
+    for (int i = 0; i < params.K; i++)
+    {
         for (int j = 0; j < params.D; j++)
             fprintf(init_centroids_file, "%f ", centroids[i * params.D + j]);
         fprintf(init_centroids_file, "\n");
     }
     fclose(init_centroids_file);
-
 }
 
 void write_results(float *centroids, uint *assignments, const char *clusters_path, const char *centroids_path, Params params)
@@ -256,7 +327,6 @@ void kmeans(float *datapoints, float *centroids, uint *assignments, Params param
         set_to_zero<<<(K - 1) / BLOCK_SIZE + 1, blockDim>>>(d_clusters_count, K);
         update_centroids<<<gridDim, blockDim, update_shared_mem>>>(d_datapoints, d_assignments, d_centroids, d_clusters_count, params);
         divide<<<(K - 1) / BLOCK_SIZE + 1, blockDim>>>(d_centroids, d_clusters_count, K, D);
-
 
         assign_points<<<gridDim, blockDim, assign_shared_mem>>>(d_datapoints, d_centroids, d_assignments, params);
 
