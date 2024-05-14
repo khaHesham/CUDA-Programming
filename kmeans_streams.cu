@@ -6,8 +6,9 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
-#define BLOCK_SIZE 32
+#define BLOCK_SIZE 128
 #define CONVERGENCE_THRESHOLD 0
+#define MAX_ITER 100
 
 typedef unsigned int uint;
 
@@ -18,7 +19,68 @@ typedef struct Params
     uint K;
 } Params;
 
-__global__ void assign_points(float *datapoints, float *centroids, uint *assignments, uint *changed, Params params)
+// Kernel to compute distances between a datapoint and all centroids
+__device__ float computeDistance(const float *datapoint, const float *centroid, int D)
+{
+    float distance = 0.0f;
+    int tid = threadIdx.x;
+    int blockSize = blockDim.x;
+
+    // Compute distance in parallel
+    for (int j = tid; j < D; j += blockSize)
+    {
+        float diff = datapoint[j] - centroid[j];
+        distance += diff * diff;
+    }
+
+    // Reduce within the block using shared memory
+    __shared__ float shared_distance[BLOCK_SIZE];
+    shared_distance[tid] = distance;
+    __syncthreads();
+
+    for (int stride = blockSize / 2; stride > 0; stride >>= 1)
+    {
+        if (tid < stride)
+        {
+            shared_distance[tid] += shared_distance[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    // Store the final result in distance
+    if (tid == 0)
+    {
+        distance = shared_distance[0];
+    }
+
+    return distance;
+}
+
+// Child kernel to find the nearest centroid for each datapoint
+__global__ void findNearestCentroids(const float *datapoints, const float *centroids, uint *assignments, int N, int K, int D)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < N)
+    {
+        float minDist = FLT_MAX;
+        uint nearestCentroid = 0;
+        for (int centroidId = 0; centroidId < K; ++centroidId)
+        {
+            float dist = computeDistance(&datapoints[idx * D], &centroids[centroidId * D], D);
+            if (dist < minDist)
+            {
+                minDist = dist;
+                nearestCentroid = centroidId;
+            }
+        }
+        if (nearestCentroid != assignments[idx])
+        {
+            assignments[idx] = nearestCentroid;
+        }
+    }
+}
+
+__global__ void assign_points(float *datapoints, float *centroids, uint *assignments, Params params)
 {
     extern __shared__ char shared_mem[];
 
@@ -45,33 +107,42 @@ __global__ void assign_points(float *datapoints, float *centroids, uint *assignm
 
     __syncthreads();
 
-    if (idx < params.N)
+    // check if we have a multiple dimensions then run computeDistance kernell else run the simple distance calculation
+    if (params.D > 10)
     {
-        uint nearest_centroid = 0;
         float min_dist = FLT_MAX;
+        uint min_cluster = 0;
 
-        for (int centroid_id = 0; centroid_id < params.K; centroid_id++)
+        for (int cluster = 0; cluster < params.K; cluster++)
         {
-            float dist = 0;
-
-            for (int j = 0; j < params.D; j++)
-            {
-                float diff = datapoint_s[threadIdx.x * params.D + j] - centroids_s[centroid_id * params.D + j];
-                dist += diff * diff;
-            }
-
+            float dist = computeDistance(&datapoint_s[threadIdx.x * params.D], &centroids_s[cluster * params.D], params.D);
             if (dist < min_dist)
             {
                 min_dist = dist;
-                nearest_centroid = centroid_id;
+                min_cluster = cluster;
             }
         }
 
-        if (nearest_centroid != assignments[idx])
+        if (min_cluster != assignments[idx])
+            assignments[idx] = min_cluster;
+    }
+    else
+    {
+        float min_dist = FLT_MAX;
+        uint min_cluster = 0;
+
+        for (int cluster = 0; cluster < params.K; cluster++)
         {
-            assignments[idx] = nearest_centroid;
-            atomicAdd(changed, 1); // Increment the number of points whose assigned cluster changed
+            float dist = (datapoint_s[threadIdx.x] - centroids_s[cluster]) * (datapoint_s[threadIdx.x] - centroids_s[cluster]);
+            if (dist < min_dist)
+            {
+                min_dist = dist;
+                min_cluster = cluster;
+            }
         }
+
+        if (min_cluster != assignments[idx])
+            assignments[idx] = min_cluster;
     }
 }
 
@@ -151,17 +222,40 @@ __global__ void divide(float *dividend, uint *divisor, uint n, uint D)
 
 void initialize_centroids(float *centroids, float *datapoints, Params params)
 {
+    for (int i = 0; i < params.K; i++)
+    {
+        uint point_idx = rand() % params.N; // generate a random number between [0, N)
+        for (int j = 0; j < params.D; j++)
+            centroids[i * params.D + j] = datapoints[point_idx * params.D + j];
+    }
+    // for (int i = 0; i < params.K * params.D; i++)
+    //     centroids[i] = (float)rand() / RAND_MAX;
 
-    FILE *init_centroids_file = fopen("init_cen.txt", "r");
+    // FILE* init_centroids_file = fopen("init.txt", "r");
+    // if (init_centroids_file == NULL) {
+    //     printf("Error opening inital centroids file.\n");
+    //     exit(1);
+    // }
+
+    // for (int i = 0; i < params.K * params.D; i++)
+    //     fscanf(init_centroids_file, "%f", &centroids[i]);
+
+    // fclose(init_centroids_file);
+
+    // write initial centroids to a file
+    FILE *init_centroids_file = fopen("init.txt", "w");
     if (init_centroids_file == NULL)
     {
         printf("Error opening inital centroids file.\n");
         exit(1);
     }
 
-    for (int i = 0; i < params.K * params.D; i++)
-        fscanf(init_centroids_file, "%f", &centroids[i]);
-
+    for (int i = 0; i < params.K; i++)
+    {
+        for (int j = 0; j < params.D; j++)
+            fprintf(init_centroids_file, "%f ", centroids[i * params.D + j]);
+        fprintf(init_centroids_file, "\n");
+    }
     fclose(init_centroids_file);
 }
 
@@ -196,94 +290,141 @@ void write_results(float *centroids, uint *assignments, const char *clusters_pat
     fclose(centroids_file);
 }
 
+void stream_assignment(float *datapoints, float *centroids, uint *assignments, Params params, float *d_datapoints, bool flag)
+{
+    // Number of streams
+    const int num_streams = 32;
+
+    // Calculate chunk size for each stream
+    int chunk_size = (params.N + num_streams - 1) / num_streams;
+
+    // Array of streams
+    cudaStream_t streams[num_streams];
+
+    // Allocate device memory for each stream
+    float *d_centroids[num_streams];
+    uint *d_assignments[num_streams];
+
+    // Copy centroids to device memory
+    cudaMalloc((void **)&d_centroids[0], params.K * params.D * sizeof(float));
+    cudaMemcpy(d_centroids[0], centroids, params.K * params.D * sizeof(float), cudaMemcpyHostToDevice);
+
+    // Allocate memory for assignments on device if needed
+    if (flag)
+    {
+        cudaMalloc((void **)&d_assignments[0], params.N * sizeof(uint));
+    }
+
+    for (int i = 0; i < num_streams; ++i)
+    {
+        cudaStreamCreate(&streams[i]);
+
+        // Allocate memory for assignments for each stream if needed
+        if (flag)
+        {
+            cudaMalloc((void **)&d_assignments[i], chunk_size * sizeof(uint)); // Allocate memory for chunk
+        }
+
+        // Copy data chunk from host to device for each stream
+        int start_index = i * chunk_size;
+        int end_index = min(start_index + chunk_size, params.N);
+        int chunk_elements = end_index - start_index;
+        cudaMemcpyAsync(d_datapoints + start_index * params.D, datapoints + start_index * params.D,
+                        chunk_elements * params.D * sizeof(float), cudaMemcpyHostToDevice, streams[i]);
+    }
+
+    // Grid configuration
+    dim3 blockDim(BLOCK_SIZE, 1);
+    size_t shared_mem = params.K * params.D * sizeof(float);
+
+    for (int i = 0; i < num_streams; ++i)
+    {
+        // Calculate grid dimension for each stream
+        int start_index = i * chunk_size;
+        int end_index = min(start_index + chunk_size, params.N);
+        int chunk_elements = end_index - start_index;
+        dim3 gridDim((chunk_elements - 1) / BLOCK_SIZE + 1, 1);
+
+        // Launch kernel for each stream
+        assign_points<<<gridDim, blockDim, shared_mem, streams[i]>>>(d_datapoints + start_index * params.D, d_centroids[0], d_assignments[i], params);
+
+        // Copy back results asynchronously if needed
+        if (!flag)
+        {
+            cudaMemcpyAsync(assignments + start_index, d_assignments[i], chunk_elements * sizeof(uint), cudaMemcpyDeviceToHost, streams[i]);
+        }
+    }
+
+    // Synchronize all streams
+    for (int i = 0; i < num_streams; ++i)
+    {
+        cudaStreamSynchronize(streams[i]);
+        cudaStreamDestroy(streams[i]);
+        if (flag)
+        {
+            cudaFree(d_assignments[i]);
+        }
+    }
+
+    cudaFree(d_centroids[0]);
+}
+
 void kmeans(float *datapoints, float *centroids, uint *assignments, Params params)
 {
     uint N = params.N, D = params.D, K = params.K;
 
-    l:int seed = time(NULL);
-    // Your code here
+    // Allocating device memory
+    float *d_datapoints, *d_centroids;
+    uint *d_assignments, *d_clusters_count;
 
-    // Jump to the label
-    goto l;
+    cudaMalloc((void **)&d_datapoints, N * D * sizeof(float));
+    cudaMalloc((void **)&d_centroids, K * D * sizeof(float));
+    cudaMalloc((void **)&d_assignments, N * sizeof(uint));
+    cudaMalloc((void **)&d_clusters_count, K * sizeof(int));
 
+    initialize_centroids(centroids, datapoints, params);
 
+    // First call to stream_assignment to put data into device memory
+    stream_assignment(datapoints, centroids, assignments, params, d_datapoints, true);
 
+    // Grid configuration
+    dim3 gridDim((N - 1) / BLOCK_SIZE + 1, 1);
+    dim3 blockDim(BLOCK_SIZE, 1);
 
-    // setup streams
-    const uint num_streams = 32;
-    cudaStream_t streams[num_streams];
-    for (int i = 0; i < num_streams; i++)
-        cudaStreamCreate(&streams[i]);
+    size_t update_shared_mem = K * D * sizeof(float) + K * sizeof(uint);
+    size_t assign_shared_mem = K * D * sizeof(float) + blockDim.x * D * sizeof(float);
 
-    // Stream the segments
-    uint segment_size = (N - 1) / num_streams + 1;      // divide data among streams
-
-    for (int i = 0; i < num_streams; i++)
+    int iter = 0;
+    while (iter < MAX_ITER)
     {
-        // bounds for the current stream
-        uint start = i * segment_size;
-        uint end = min((i + 1) * segment_size, N);
+        set_to_zero<<<(K * D - 1) / BLOCK_SIZE + 1, blockDim>>>(d_centroids, K * D);
+        set_to_zero<<<(K - 1) / BLOCK_SIZE + 1, blockDim>>>(d_clusters_count, K);
+        update_centroids<<<gridDim, blockDim, update_shared_mem>>>(d_datapoints, d_assignments, d_centroids, d_clusters_count, params);
+        divide<<<(K - 1) / BLOCK_SIZE + 1, blockDim>>>(d_centroids, d_clusters_count, K, D);
 
-        // size of the current stream
-        uint stream_size = end - start;
-        uint stream_offset = start * D;
-
-        // create each stream memory  (or i can create it one time and adjust indexing inside it)
-        float *d_datapoints, *d_centroids;
-        uint *d_assignments, *d_clusters_count;
-
-        cudaMalloc((void **)&d_datapoints, stream_size * D * sizeof(float)); 
-        cudaMalloc((void **)&d_centroids, K * D * sizeof(float));
-        cudaMalloc((void **)&d_assignments, stream_size * sizeof(uint));
-        cudaMalloc((void **)&d_clusters_count, K * sizeof(int));
-
-        cudaMemcpyAsync(d_datapoints, &datapoints[start], stream_size * D * sizeof(float), cudaMemcpyHostToDevice, streams[i]);
-        cudaMemcpyAsync(d_centroids, centroids, K * D * sizeof(float), cudaMemcpyHostToDevice, streams[i]);
-
-        dim3 gridDim((stream_size - 1) / BLOCK_SIZE + 1, 1);   // split grid among each stream
-        dim3 blockDim(BLOCK_SIZE, 1);
-
-        bool converged = false;
-
-        uint changed, *d_changed;
-        cudaMalloc((void **)&d_changed, sizeof(uint));
-
-        size_t update_shared_mem = K * stream_size * sizeof(float) + K * sizeof(uint);
-        size_t assign_shared_mem = K * stream_size * sizeof(float) + blockDim.x * stream_size * sizeof(float);
-
-        assign_points<<<gridDim, blockDim, assign_shared_mem, streams[i]>>>(d_datapoints, d_centroids, d_assignments, d_changed, params);
-        cudaDeviceSynchronize();
-
-        while (!converged)
+        cudaError_t cudaStatus = cudaGetLastError();
+        if (cudaStatus != cudaSuccess)
         {
-            set_to_zero<<<(K * D - 1) / BLOCK_SIZE + 1, blockDim, 0, streams[i]>>>(d_centroids, K * D);
-            set_to_zero<<<(K - 1) / BLOCK_SIZE + 1, blockDim, 0, streams[i]>>>(d_clusters_count, K);
-            update_centroids<<<gridDim, blockDim, update_shared_mem, streams[i]>>>(d_datapoints, d_assignments, d_centroids, d_clusters_count, params);
-            divide<<<(K - 1) / BLOCK_SIZE + 1, blockDim, 0, streams[i]>>>(d_centroids, d_clusters_count, K, D);
-
-            cudaMemset(d_changed, 0, sizeof(uint));
-            assign_points<<<gridDim, blockDim, assign_shared_mem>>>(d_datapoints, d_centroids, d_assignments, d_changed, params);
-            cudaMemcpy(&changed, d_changed, sizeof(uint), cudaMemcpyDeviceToHost);
-
-            cudaError_t cudaStatus = cudaGetLastError();
-            if (cudaStatus != cudaSuccess)
-            {
-                printf("Kernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
-                exit(1);
-            }
-
-            converged = (changed <= CONVERGENCE_THRESHOLD);
+            printf("Kernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
+            exit(1);
         }
-        cudaMemcpy(centroids, d_centroids, K * D * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(assignments, d_assignments, N * sizeof(uint), cudaMemcpyDeviceToHost);
 
-        // Free device memory
-        cudaFree(d_datapoints);
-        cudaFree(d_centroids);
-        cudaFree(d_assignments);
-        cudaFree(d_clusters_count);
-        cudaFree(d_changed);
+        // Last iteration, stream the last assignment back to host
+        if (iter == MAX_ITER - 1)
+        {
+            stream_assignment(datapoints, centroids, assignments, params, d_datapoints, false); // Bring back assignments to host
+            break;
+        }
+
+        assign_points<<<gridDim, blockDim, assign_shared_mem>>>(d_datapoints, d_centroids, d_assignments, params);
+        iter++;
     }
+
+    // Free device memory
+    cudaFree(d_datapoints);
+    cudaFree(d_centroids);
+    cudaFree(d_assignments);
+    cudaFree(d_clusters_count);
 }
 
 int main(int argc, char *argv[])
@@ -293,6 +434,9 @@ int main(int argc, char *argv[])
         printf("Usage: ./kmeans data.txt clusters.txt centroids.txt N D K");
         return 1;
     }
+
+    // set the seed for random number generation
+    srand(0);
 
     uint N = atoi(argv[4]);
     uint D = atoi(argv[5]);

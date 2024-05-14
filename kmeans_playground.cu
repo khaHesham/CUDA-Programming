@@ -19,7 +19,6 @@ typedef struct Params
     uint K;
 } Params;
 
-
 // Kernel to compute distances between a datapoint and all centroids
 __device__ float computeDistance(const float *datapoint, const float *centroid, int D)
 {
@@ -81,8 +80,9 @@ __global__ void findNearestCentroids(const float *datapoints, const float *centr
     }
 }
 
-__global__ void assign_points(float *datapoints, float *centroids, uint *assignments, Params params) {
-     extern __shared__ char shared_mem[];
+__global__ void assign_points(float *datapoints, float *centroids, uint *assignments, Params params)
+{
+    extern __shared__ char shared_mem[];
 
     uint idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -144,7 +144,6 @@ __global__ void assign_points(float *datapoints, float *centroids, uint *assignm
         if (min_cluster != assignments[idx])
             assignments[idx] = min_cluster;
     }
-
 }
 
 __global__ void update_centroids(float *datapoints, uint *assignments, float *centroids, uint *clusters_count, Params params)
@@ -327,7 +326,6 @@ void kmeans(float *datapoints, float *centroids, uint *assignments, Params param
         set_to_zero<<<(K - 1) / BLOCK_SIZE + 1, blockDim>>>(d_clusters_count, K);
         update_centroids<<<gridDim, blockDim, update_shared_mem>>>(d_datapoints, d_assignments, d_centroids, d_clusters_count, params);
         divide<<<(K - 1) / BLOCK_SIZE + 1, blockDim>>>(d_centroids, d_clusters_count, K, D);
-
         assign_points<<<gridDim, blockDim, assign_shared_mem>>>(d_datapoints, d_centroids, d_assignments, params);
 
         cudaError_t cudaStatus = cudaGetLastError();
